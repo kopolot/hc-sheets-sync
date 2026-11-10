@@ -1,0 +1,7 @@
+# Copy to local.properties (gitignored). sdk.dir is normally written by Android Studio.
+sdk.dir=/home/YOU/Android/Sdk
+
+# Apps Script Web App URL (Deploy -> Web app -> URL ending with /exec)
+SYNC_URL=https://script.google.com/macros/s/XXXXXXXX/exec
+# Same value as Script Property SECRET in Apps Script. Use letters/digits only.
+SYNC_SECRET=change-me-long-random-string

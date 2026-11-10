@@ -1,0 +1,22 @@
+# secrets / machine-local
+local.properties
+*.keystore
+*.jks
+keystore.properties
+
+# build
+build/
+.gradle/
+.kotlin/
+captures/
+*.apk
+*.aab
+
+# IDE
+.idea/
+*.iml
+.DS_Store
+
+# never commit health data exports
+*.csv
+exports/
