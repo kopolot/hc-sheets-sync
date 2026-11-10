@@ -1,0 +1,210 @@
+package io.github.kopolot.hcsync.health
+
+import android.content.Context
+import androidx.health.connect.client.HealthConnectClient
+import androidx.health.connect.client.HealthConnectFeatures
+import androidx.health.connect.client.aggregate.AggregateMetric
+import androidx.health.connect.client.aggregate.AggregationResult
+import androidx.health.connect.client.records.ActiveCaloriesBurnedRecord
+import androidx.health.connect.client.records.BodyFatRecord
+import androidx.health.connect.client.records.ExerciseSessionRecord
+import androidx.health.connect.client.records.NutritionRecord
+import androidx.health.connect.client.records.Record
+import androidx.health.connect.client.records.RestingHeartRateRecord
+import androidx.health.connect.client.records.SleepSessionRecord
+import androidx.health.connect.client.records.StepsRecord
+import androidx.health.connect.client.records.TotalCaloriesBurnedRecord
+import androidx.health.connect.client.records.WeightRecord
+import androidx.health.connect.client.request.AggregateGroupByPeriodRequest
+import androidx.health.connect.client.request.AggregateRequest
+import androidx.health.connect.client.request.ReadRecordsRequest
+import androidx.health.connect.client.time.TimeRangeFilter
+import io.github.kopolot.hcsync.domain.DayAggregate
+import io.github.kopolot.hcsync.domain.HealthSnapshot
+import io.github.kopolot.hcsync.domain.Measurement
+import io.github.kopolot.hcsync.domain.SleepSession
+import io.github.kopolot.hcsync.domain.TimeInterval
+import io.github.kopolot.hcsync.domain.WorkoutSession
+import java.time.LocalDate
+import java.time.Period
+import java.time.ZoneId
+import kotlin.reflect.KClass
+
+class HealthConnectDataSource(
+    private val context: Context,
+    private val zone: () -> ZoneId = { ZoneId.systemDefault() },
+) : HealthDataSource {
+
+    private val client: HealthConnectClient by lazy { HealthConnectClient.getOrCreate(context) }
+
+    override suspend fun status(): HcStatus {
+        val availability = when (HealthConnectClient.getSdkStatus(context)) {
+            HealthConnectClient.SDK_AVAILABLE -> HcAvailability.AVAILABLE
+            HealthConnectClient.SDK_UNAVAILABLE_PROVIDER_UPDATE_REQUIRED -> HcAvailability.UPDATE_REQUIRED
+            else -> HcAvailability.UNAVAILABLE
+        }
+        if (availability != HcAvailability.AVAILABLE) return HcStatus(availability)
+        val features = client.features
+        return HcStatus(
+            availability = availability,
+            granted = client.permissionController.getGrantedPermissions(),
+            backgroundFeature = features.getFeatureStatus(HealthConnectFeatures.FEATURE_READ_HEALTH_DATA_IN_BACKGROUND) ==
+                HealthConnectFeatures.FEATURE_STATUS_AVAILABLE,
+            historyFeature = features.getFeatureStatus(HealthConnectFeatures.FEATURE_READ_HEALTH_DATA_HISTORY) ==
+                HealthConnectFeatures.FEATURE_STATUS_AVAILABLE,
+        )
+    }
+
+    override suspend fun read(from: LocalDate, toInclusive: LocalDate): HealthSnapshot {
+        val granted = client.permissionController.getGrantedPermissions()
+        fun has(type: KClass<out Record>) = Permissions.read(type) in granted
+        val z = zone()
+
+        // Raw window is widened by a day on each side: sleep that ends on `from` starts the day before,
+        // and records with their own zone offset may fall on a neighbouring device-local day.
+        // The aggregator only emits days inside the requested range.
+        val rawFilter = TimeRangeFilter.between(
+            from.minusDays(1).atStartOfDay(z).toInstant(),
+            toInclusive.plusDays(2).atStartOfDay(z).toInstant(),
+        )
+
+        return HealthSnapshot(
+            aggregates = aggregates(from, toInclusive, granted),
+            weights = if (has(WeightRecord::class)) readAll<WeightRecord>(rawFilter).map {
+                Measurement(it.time, it.weight.inKilograms, it.zoneOffset)
+            } else emptyList(),
+            bodyFat = if (has(BodyFatRecord::class)) readAll<BodyFatRecord>(rawFilter).map {
+                Measurement(it.time, it.percentage.value, it.zoneOffset)
+            } else emptyList(),
+            sleep = if (has(SleepSessionRecord::class)) readAll<SleepSessionRecord>(rawFilter).map { s ->
+                SleepSession(
+                    start = s.startTime,
+                    end = s.endTime,
+                    awakeStages = s.stages.filter { it.stage in AWAKE_STAGES }
+                        .map { TimeInterval(it.startTime, it.endTime) },
+                    endOffset = s.endZoneOffset,
+                )
+            } else emptyList(),
+            workouts = if (has(ExerciseSessionRecord::class)) readAll<ExerciseSessionRecord>(rawFilter).map {
+                WorkoutSession(
+                    id = it.metadata.id,
+                    type = ExerciseTypes.name(it.exerciseType),
+                    title = it.title,
+                    start = it.startTime,
+                    end = it.endTime,
+                    startOffset = it.startZoneOffset,
+                )
+            } else emptyList(),
+        )
+    }
+
+    private suspend fun aggregates(from: LocalDate, toInclusive: LocalDate, granted: Set<String>): List<DayAggregate> {
+        val metrics = buildSet<AggregateMetric<*>> {
+            if (Permissions.read(NutritionRecord::class) in granted) addAll(NUTRITION_METRICS)
+            if (Permissions.read(TotalCaloriesBurnedRecord::class) in granted) add(TotalCaloriesBurnedRecord.ENERGY_TOTAL)
+            if (Permissions.read(ActiveCaloriesBurnedRecord::class) in granted) add(ActiveCaloriesBurnedRecord.ACTIVE_CALORIES_TOTAL)
+            if (Permissions.read(StepsRecord::class) in granted) add(StepsRecord.COUNT_TOTAL)
+            if (Permissions.read(RestingHeartRateRecord::class) in granted) add(RestingHeartRateRecord.BPM_AVG)
+        }
+        if (metrics.isEmpty()) return emptyList()
+
+        val groups = client.aggregateGroupByPeriod(
+            AggregateGroupByPeriodRequest(
+                metrics = metrics,
+                timeRangeFilter = TimeRangeFilter.between(
+                    from.atStartOfDay(),
+                    toInclusive.plusDays(1).atStartOfDay(),
+                ),
+                timeRangeSlicer = Period.ofDays(1),
+            )
+        )
+        return groups.map { g -> g.result.toDayAggregate(g.startTime.toLocalDate()) }
+    }
+
+    override suspend fun diagnose(date: LocalDate): DayDiagnostics {
+        val granted = client.permissionController.getGrantedPermissions()
+        val z = zone()
+        val localFilter = TimeRangeFilter.between(date.atStartOfDay(), date.plusDays(1).atStartOfDay())
+        val rawFilter = TimeRangeFilter.between(
+            date.atStartOfDay(z).toInstant(),
+            date.plusDays(1).atStartOfDay(z).toInstant(),
+        )
+        val notes = mutableListOf<String>()
+        val metrics = mutableListOf<MetricDiagnostics>()
+        val aggOrigins = mutableSetOf<String>()
+
+        suspend fun <T : Record> compare(
+            label: String,
+            type: KClass<T>,
+            metric: AggregateMetric<*>,
+            aggValue: (AggregationResult) -> Double?,
+            rawValue: (T) -> Double?,
+        ) {
+            if (Permissions.read(type) !in granted) {
+                notes += "$label: brak zgody"
+                return
+            }
+            val agg = client.aggregate(AggregateRequest(setOf(metric), localFilter))
+            aggOrigins += agg.dataOrigins.map { it.packageName }
+            val records = readAll(type, rawFilter)
+            val byOrigin = records.groupBy { it.metadata.dataOrigin.packageName }
+                .mapValues { (_, rs) -> rs.sumOf { rawValue(it) ?: 0.0 } }
+            metrics += MetricDiagnostics(label, aggValue(agg), byOrigin.values.sum(), byOrigin, records.size)
+        }
+
+        compare("kcal_in", NutritionRecord::class, NutritionRecord.ENERGY_TOTAL,
+            { it[NutritionRecord.ENERGY_TOTAL]?.inKilocalories }, { it.energy?.inKilocalories })
+        compare("protein_g", NutritionRecord::class, NutritionRecord.PROTEIN_TOTAL,
+            { it[NutritionRecord.PROTEIN_TOTAL]?.inGrams }, { it.protein?.inGrams })
+        compare("kcal_burned_total", TotalCaloriesBurnedRecord::class, TotalCaloriesBurnedRecord.ENERGY_TOTAL,
+            { it[TotalCaloriesBurnedRecord.ENERGY_TOTAL]?.inKilocalories }, { it.energy.inKilocalories })
+        compare("kcal_active", ActiveCaloriesBurnedRecord::class, ActiveCaloriesBurnedRecord.ACTIVE_CALORIES_TOTAL,
+            { it[ActiveCaloriesBurnedRecord.ACTIVE_CALORIES_TOTAL]?.inKilocalories }, { it.energy.inKilocalories })
+        compare("steps", StepsRecord::class, StepsRecord.COUNT_TOTAL,
+            { it[StepsRecord.COUNT_TOTAL]?.toDouble() }, { it.count.toDouble() })
+
+        notes += "Surowe = prosta suma rekordów zaczynających się tego dnia, bez deduplikacji. " +
+            "Agregat HC dzieli rekordy na granicy dnia i stosuje priorytety źródeł."
+        return DayDiagnostics(date, metrics, aggOrigins, notes)
+    }
+
+    private suspend inline fun <reified T : Record> readAll(filter: TimeRangeFilter): List<T> =
+        readAll(T::class, filter)
+
+    private suspend fun <T : Record> readAll(type: KClass<T>, filter: TimeRangeFilter): List<T> {
+        val out = mutableListOf<T>()
+        var token: String? = null
+        do {
+            val resp = client.readRecords(ReadRecordsRequest(type, filter, pageToken = token))
+            out += resp.records
+            token = resp.pageToken
+        } while (!token.isNullOrEmpty())
+        return out
+    }
+
+    private fun AggregationResult.toDayAggregate(date: LocalDate) = DayAggregate(
+        date = date,
+        kcalIn = this[NutritionRecord.ENERGY_TOTAL]?.inKilocalories,
+        proteinG = this[NutritionRecord.PROTEIN_TOTAL]?.inGrams,
+        fatG = this[NutritionRecord.TOTAL_FAT_TOTAL]?.inGrams,
+        carbsG = this[NutritionRecord.TOTAL_CARBOHYDRATE_TOTAL]?.inGrams,
+        kcalBurnedTotal = this[TotalCaloriesBurnedRecord.ENERGY_TOTAL]?.inKilocalories,
+        kcalActive = this[ActiveCaloriesBurnedRecord.ACTIVE_CALORIES_TOTAL]?.inKilocalories,
+        steps = this[StepsRecord.COUNT_TOTAL],
+        restingHr = this[RestingHeartRateRecord.BPM_AVG],
+    )
+
+    private companion object {
+        val NUTRITION_METRICS = setOf(
+            NutritionRecord.ENERGY_TOTAL,
+            NutritionRecord.PROTEIN_TOTAL,
+            NutritionRecord.TOTAL_FAT_TOTAL,
+            NutritionRecord.TOTAL_CARBOHYDRATE_TOTAL,
+        )
+        val AWAKE_STAGES = setOf(
+            SleepSessionRecord.STAGE_TYPE_AWAKE,
+            SleepSessionRecord.STAGE_TYPE_AWAKE_IN_BED,
+            SleepSessionRecord.STAGE_TYPE_OUT_OF_BED,
+        )
+    }
+}

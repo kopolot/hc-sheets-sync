@@ -85,7 +85,7 @@ object DailyAggregator {
         title = title,
         start = start,
         end = end,
-        minutes = Duration.between(start, end).toSeconds().let { (it / 60.0).roundToInt() },
+        minutes = Duration.between(start, end).seconds.let { (it / 60.0).roundToInt() },
     )
 
     private fun Double.round(decimals: Int): Double {
