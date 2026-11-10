@@ -59,6 +59,8 @@ curl -L -H 'Content-Type: application/json' \
 
 Logikę skryptu można też sprawdzić offline: `node apps-script/Code.test.js`.
 
+Do testów z emulatorem wersja debug pozwala na zwykłe HTTP wyłącznie do `10.0.2.2` (host emulatora), np. `SYNC_URL=http://10.0.2.2:8765/exec SYNC_SECRET=test ./gradlew assembleDebug` z lokalnym mockiem. Wersja release tego nie ma.
+
 ### 2. Konfiguracja apki
 
 ```bash
@@ -87,7 +89,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 ## Uwagi
 
-- **`kcal_burned_total` to nie pełne TDEE.** Samsung nie zapisuje do Health Connect kalorii aktywności spoza treningów. Zależnie od wersji Health Connect agregat może być dopełniany kaloriami spoczynkowymi (BMR). Sekcja Diagnostyka pokazuje, co faktycznie jest w rekordach.
+- **`kcal_burned_total` zawiera szacunek BMR liczony przez Health Connect.** Na czystym emulatorze, bez żadnych rekordów, agregat HC zwraca ~1565 kcal na każdy dzień. HC sam dolicza przemianę spoczynkową (z wagi/wzrostu albo domyślnych wartości). Samsung nie zapisuje do HC kalorii aktywności spoza treningów, więc ta liczba to w praktyce „BMR + to, co dotarło do HC”, a nie pełne TDEE. Dla bota pewniejsze są `kcal_active` i treningi. Sekcja Diagnostyka pokazuje, ile z tej liczby pochodzi z prawdziwych rekordów.
 - **Strefa czasowa:** dni liczone są w strefie telefonu. Jeśli rekord ma własny offset strefy (np. pomiar w podróży), dzień liczy się według niego.
 - **Dzisiejszy dzień** jest niepełny i zostanie nadpisany przy kolejnym syncu.
 - **Powtórz backfill:** przycisk w sekcji Sync (np. po nadaniu zgody na historię).
