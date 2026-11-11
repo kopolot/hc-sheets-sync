@@ -4,6 +4,7 @@ import android.os.RemoteException
 import io.github.kopolot.hcsync.data.LogLevel
 import io.github.kopolot.hcsync.data.StatusStore
 import io.github.kopolot.hcsync.domain.DailyAggregator
+import io.github.kopolot.hcsync.domain.SkippedRead
 import io.github.kopolot.hcsync.health.HcAvailability
 import io.github.kopolot.hcsync.health.HealthDataSource
 import io.github.kopolot.hcsync.health.Permissions
@@ -40,10 +41,11 @@ class SyncRepository(
         } catch (e: RemoteException) {
             // HC throws RemoteException e.g. when its rate limit is hit.
             SyncOutcome.Retry("Health Connect: ${e.message ?: e.javaClass.simpleName}")
+        } catch (e: CancellationException) {
+            // Must come before IllegalStateException, which CancellationException extends.
+            throw e
         } catch (e: IllegalStateException) {
             SyncOutcome.Retry("Błąd: ${e.message ?: e.javaClass.simpleName}")
-        } catch (e: CancellationException) {
-            throw e
         } catch (e: Exception) {
             // Anything unexpected must still land in the status/log, otherwise the worker dies silently.
             SyncOutcome.Failure("Nieoczekiwany błąd: ${e.javaClass.simpleName}: ${e.message}")
@@ -87,11 +89,12 @@ class SyncRepository(
 
         var daysSent = 0
         var workoutsSent = 0
+        val skipped = mutableListOf<SkippedRead>()
         var chunkStart = from
         while (!chunkStart.isAfter(today)) {
             val chunkEnd = minOf(chunkStart.plusDays(CHUNK_DAYS - 1L), today)
             val snapshot = source.read(chunkStart, chunkEnd)
-            snapshot.skipped.forEach { store.log(LogLevel.WARN, it) }
+            skipped += snapshot.skipped
             val summaries = DailyAggregator.build(chunkStart, chunkEnd, zone, snapshot)
             val resp = client.upload(summaries)
             daysSent += resp.days ?: summaries.size
@@ -99,6 +102,7 @@ class SyncRepository(
             chunkStart = chunkEnd.plusDays(1)
         }
         if (backfill) store.setBackfillDone(true)
+        skippedSummary(skipped, zone)?.let { store.log(LogLevel.WARN, it) }
 
         val kind = if (backfill) "backfill $dayCount dni" else "ostatnie $dayCount dni"
         return SyncOutcome.Success("OK: $kind ($from – $today), dni: $daysSent, treningi: $workoutsSent")

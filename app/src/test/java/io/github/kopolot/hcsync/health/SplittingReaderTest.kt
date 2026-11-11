@@ -50,11 +50,35 @@ class SplittingReaderTest {
     @Test
     fun persistentErrorIsRethrown() = runTest {
         try {
-            readSplitting<Instant>(start, end, maxSkipped = 3) { _, _ -> throw IllegalArgumentException("broken") }
+            readSplitting<Instant>(start, end, maxSkippedPerDay = 1) { _, _ -> throw IllegalArgumentException("broken") }
             fail("expected rethrow")
         } catch (e: IllegalArgumentException) {
             assertEquals("broken", e.message)
         }
+    }
+
+    @Test
+    fun skipLimitScalesWithWindowLength() = runTest {
+        // One bad record per day for 32 days (a backfill chunk): 32 skipped hours, more than a fixed 24.
+        val longEnd = start.plus(Duration.ofDays(32))
+        val bad = (0 until 32).map { start.plus(Duration.ofDays(it.toLong())).plus(Duration.ofHours(12)) }
+        val good = (0 until 32).map { start.plus(Duration.ofDays(it.toLong())).plus(Duration.ofHours(3)) }
+        val res = readSplitting(start, longEnd, read = fakeRead(good + bad, bad.toSet()))
+        assertEquals(32, res.skipped.size)
+        assertEquals(good.sorted(), res.items.sorted())
+    }
+
+    @Test
+    fun limitIsPerDayOfWindow() = runTest {
+        // 4-day window, 2 allowed per day = 8; 9 bad hours must rethrow.
+        val bad = (0 until 9).map { start.plus(Duration.ofHours(it * 10L + 1)) }
+        try {
+            readSplitting(start, end, maxSkippedPerDay = 2, read = fakeRead(bad, bad.toSet()))
+            fail("expected rethrow")
+        } catch (_: IllegalArgumentException) {
+        }
+        val ok = readSplitting(start, end, maxSkippedPerDay = 2, read = fakeRead(bad.take(8), bad.toSet()))
+        assertEquals(8, ok.skipped.size)
     }
 
     @Test

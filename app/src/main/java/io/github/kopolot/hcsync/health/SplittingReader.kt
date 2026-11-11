@@ -16,15 +16,18 @@ data class SplitReadResult<T>(val items: List<T>, val skipped: List<SkippedWindo
  * malformed record (e.g. Samsung writes ActiveCaloriesBurned with startTime == endTime, which the library
  * rejects with "startTime must be before endTime"). Without this, one bad record kills the whole sync.
  *
- * If more than [maxSkipped] windows fail, the error is not a single bad record, so it is rethrown.
+ * If more than [maxSkippedPerDay] windows per started day of the range fail, the error is not a few bad
+ * records, so it is rethrown. The limit scales with the range, so a long backfill window tolerates the same
+ * density of bad records as the regular one.
  */
 suspend fun <T> readSplitting(
     start: Instant,
     end: Instant,
     minWindow: Duration = Duration.ofHours(1),
-    maxSkipped: Int = 24,
+    maxSkippedPerDay: Int = DEFAULT_MAX_SKIPPED_PER_DAY,
     read: suspend (Instant, Instant) -> List<T>,
 ): SplitReadResult<T> {
+    val maxSkipped = maxSkippedPerDay * maxOf(1L, ceilDays(Duration.between(start, end)))
     val items = mutableListOf<T>()
     val skipped = mutableListOf<SkippedWindow>()
 
@@ -48,3 +51,9 @@ suspend fun <T> readSplitting(
     go(start, end)
     return SplitReadResult(items, skipped)
 }
+
+const val DEFAULT_MAX_SKIPPED_PER_DAY = 6
+
+private fun ceilDays(d: Duration): Long = (d.toMillis() + DAY_MS - 1) / DAY_MS
+
+private const val DAY_MS = 24L * 60 * 60 * 1000

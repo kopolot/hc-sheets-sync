@@ -23,6 +23,7 @@ import io.github.kopolot.hcsync.domain.BurnRecord
 import io.github.kopolot.hcsync.domain.DayAggregate
 import io.github.kopolot.hcsync.domain.HealthSnapshot
 import io.github.kopolot.hcsync.domain.Measurement
+import io.github.kopolot.hcsync.domain.SkippedRead
 import io.github.kopolot.hcsync.domain.SleepSession
 import io.github.kopolot.hcsync.domain.TimeInterval
 import io.github.kopolot.hcsync.domain.WorkoutSession
@@ -30,6 +31,7 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.Period
 import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import kotlin.reflect.KClass
 
 class HealthConnectDataSource(
@@ -67,9 +69,9 @@ class HealthConnectDataSource(
         // The aggregator only emits days inside the requested range.
         val rawStart = from.minusDays(1).atStartOfDay(z).toInstant()
         val rawEnd = toInclusive.plusDays(2).atStartOfDay(z).toInstant()
-        val skipped = mutableListOf<String>()
+        val skipped = mutableListOf<SkippedRead>()
         suspend fun <T : Record> raw(type: KClass<T>): List<T> =
-            readAll(type, rawStart, rawEnd) { skipped += it }
+            readAll(type, rawStart, rawEnd, skipped)
 
         return HealthSnapshot(
             aggregates = aggregates(from, toInclusive, granted),
@@ -141,6 +143,12 @@ class HealthConnectDataSource(
         val notes = mutableListOf<String>()
         val metrics = mutableListOf<MetricDiagnostics>()
         val aggOrigins = mutableSetOf<String>()
+        val skipped = mutableListOf<SkippedRead>()
+        // One read per record type: kcal_in and protein_g both come from NutritionRecord.
+        val cache = mutableMapOf<KClass<out Record>, List<Record>>()
+        @Suppress("UNCHECKED_CAST")
+        suspend fun <T : Record> records(type: KClass<T>): List<T> =
+            cache.getOrPut(type) { readAll(type, rawStart, rawEnd, skipped) } as List<T>
 
         suspend fun <T : Record> compare(
             label: String,
@@ -155,7 +163,7 @@ class HealthConnectDataSource(
             }
             val agg = client.aggregate(AggregateRequest(setOf(metric), localFilter))
             aggOrigins += agg.dataOrigins.map { it.packageName }
-            val records = readAll(type, rawStart, rawEnd) { notes += it }
+            val records = records(type)
             val byOrigin = records.groupBy { it.metadata.dataOrigin.packageName }
                 .mapValues { (_, rs) -> rs.sumOf { rawValue(it) ?: 0.0 } }
             metrics += MetricDiagnostics(label, aggValue(agg), byOrigin.values.sum(), byOrigin, records.size)
@@ -184,6 +192,11 @@ class HealthConnectDataSource(
                 "kcal_burned_total: są rekordy total (%d); ile BMR HC doliczył, nie da się tu wiarygodnie rozdzielić.".format(total.rawCount)
             }
         }
+        val fmt = DateTimeFormatter.ofPattern("HH:mm")
+        skipped.forEach {
+            notes += "Pominięto uszkodzony rekord ${it.recordType} w oknie " +
+                "${fmt.format(it.start.atZone(z))}–${fmt.format(it.end.atZone(z))}"
+        }
         notes += "Surowe = prosta suma rekordów zaczynających się tego dnia, bez deduplikacji. " +
             "Agregat HC dzieli rekordy na granicy dnia i stosuje priorytety źródeł."
         return DayDiagnostics(date, metrics, aggOrigins, notes)
@@ -192,13 +205,13 @@ class HealthConnectDataSource(
     /**
      * Reads all pages of [type] in [start, end). A malformed record makes the HC library throw for the
      * whole page, so on [IllegalArgumentException] the window is split and the bad hour is skipped
-     * (reported through [onSkipped]). Records spanning a split point come back twice, hence distinctBy id.
+     * (added to [skipped]). Records spanning a split point come back twice, hence distinctBy id.
      */
     private suspend fun <T : Record> readAll(
         type: KClass<T>,
         start: Instant,
         end: Instant,
-        onSkipped: (String) -> Unit,
+        skipped: MutableList<SkippedRead>,
     ): List<T> {
         val result = readSplitting(start, end) { from, to ->
             val out = mutableListOf<T>()
@@ -212,10 +225,9 @@ class HealthConnectDataSource(
             } while (!token.isNullOrEmpty())
             out
         }
-        result.skipped.forEach {
-            onSkipped("Pominięto uszkodzony rekord ${type.simpleName} w oknie ${it.start} – ${it.end}")
-        }
-        return if (result.skipped.isEmpty()) result.items else result.items.distinctBy { it.metadata.id }
+        result.skipped.mapTo(skipped) { SkippedRead(type.simpleName ?: "?", it.start, it.end) }
+        // Always dedupe: a split can happen without any window ending up skipped.
+        return result.items.distinctBy { it.metadata.id }
     }
 
     private fun AggregationResult.toDayAggregate(date: LocalDate) = DayAggregate(
