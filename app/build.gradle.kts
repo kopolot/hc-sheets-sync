@@ -1,3 +1,4 @@
+import com.android.build.api.variant.HostTestBuilder
 import java.util.Properties
 
 plugins {
@@ -53,6 +54,18 @@ android {
 
     testOptions {
         unitTests.isReturnDefaultValues = true
+        // Compose Preview's generate*ComposePreviewRunfiles task reads the unit-test
+        // resource APK. AGP 9 leaves that APK out unless resources are included.
+        unitTests.isIncludeAndroidResources = true
+    }
+}
+
+// AGP enables unit tests only for the tested build type (debug). The release
+// Compose Preview task still gets registered and refuses to be created without them,
+// which breaks `./gradlew :app:tasks`.
+androidComponents {
+    beforeVariants(selector().withBuildType("release")) { builder ->
+        builder.hostTests.getValue(HostTestBuilder.UNIT_TEST_TYPE).enable = true
     }
 }
 
