@@ -10,6 +10,7 @@ import io.github.kopolot.hcsync.health.Permissions
 import io.github.kopolot.hcsync.net.PermanentSyncException
 import io.github.kopolot.hcsync.net.SheetsClient
 import java.io.IOException
+import kotlin.coroutines.cancellation.CancellationException
 import java.time.Clock
 import java.time.LocalDate
 
@@ -41,6 +42,11 @@ class SyncRepository(
             SyncOutcome.Retry("Health Connect: ${e.message ?: e.javaClass.simpleName}")
         } catch (e: IllegalStateException) {
             SyncOutcome.Retry("Błąd: ${e.message ?: e.javaClass.simpleName}")
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Anything unexpected must still land in the status/log, otherwise the worker dies silently.
+            SyncOutcome.Failure("Nieoczekiwany błąd: ${e.javaClass.simpleName}: ${e.message}")
         }
         when (outcome) {
             is SyncOutcome.Success -> store.recordAttempt(true, outcome.message)
@@ -85,6 +91,7 @@ class SyncRepository(
         while (!chunkStart.isAfter(today)) {
             val chunkEnd = minOf(chunkStart.plusDays(CHUNK_DAYS - 1L), today)
             val snapshot = source.read(chunkStart, chunkEnd)
+            snapshot.skipped.forEach { store.log(LogLevel.WARN, it) }
             val summaries = DailyAggregator.build(chunkStart, chunkEnd, zone, snapshot)
             val resp = client.upload(summaries)
             daysSent += resp.days ?: summaries.size

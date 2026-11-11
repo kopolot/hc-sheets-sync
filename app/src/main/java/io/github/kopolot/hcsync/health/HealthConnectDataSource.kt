@@ -26,6 +26,7 @@ import io.github.kopolot.hcsync.domain.Measurement
 import io.github.kopolot.hcsync.domain.SleepSession
 import io.github.kopolot.hcsync.domain.TimeInterval
 import io.github.kopolot.hcsync.domain.WorkoutSession
+import java.time.Instant
 import java.time.LocalDate
 import java.time.Period
 import java.time.ZoneId
@@ -64,20 +65,21 @@ class HealthConnectDataSource(
         // Raw window is widened by a day on each side: sleep that ends on `from` starts the day before,
         // and records with their own zone offset may fall on a neighbouring device-local day.
         // The aggregator only emits days inside the requested range.
-        val rawFilter = TimeRangeFilter.between(
-            from.minusDays(1).atStartOfDay(z).toInstant(),
-            toInclusive.plusDays(2).atStartOfDay(z).toInstant(),
-        )
+        val rawStart = from.minusDays(1).atStartOfDay(z).toInstant()
+        val rawEnd = toInclusive.plusDays(2).atStartOfDay(z).toInstant()
+        val skipped = mutableListOf<String>()
+        suspend fun <T : Record> raw(type: KClass<T>): List<T> =
+            readAll(type, rawStart, rawEnd) { skipped += it }
 
         return HealthSnapshot(
             aggregates = aggregates(from, toInclusive, granted),
-            weights = if (has(WeightRecord::class)) readAll<WeightRecord>(rawFilter).map {
+            weights = if (has(WeightRecord::class)) raw(WeightRecord::class).map {
                 Measurement(it.time, it.weight.inKilograms, it.zoneOffset)
             } else emptyList(),
-            bodyFat = if (has(BodyFatRecord::class)) readAll<BodyFatRecord>(rawFilter).map {
+            bodyFat = if (has(BodyFatRecord::class)) raw(BodyFatRecord::class).map {
                 Measurement(it.time, it.percentage.value, it.zoneOffset)
             } else emptyList(),
-            sleep = if (has(SleepSessionRecord::class)) readAll<SleepSessionRecord>(rawFilter).map { s ->
+            sleep = if (has(SleepSessionRecord::class)) raw(SleepSessionRecord::class).map { s ->
                 SleepSession(
                     start = s.startTime,
                     end = s.endTime,
@@ -86,7 +88,7 @@ class HealthConnectDataSource(
                     endOffset = s.endZoneOffset,
                 )
             } else emptyList(),
-            workouts = if (has(ExerciseSessionRecord::class)) readAll<ExerciseSessionRecord>(rawFilter).map {
+            workouts = if (has(ExerciseSessionRecord::class)) raw(ExerciseSessionRecord::class).map {
                 WorkoutSession(
                     id = it.metadata.id,
                     type = ExerciseTypes.name(it.exerciseType),
@@ -97,12 +99,13 @@ class HealthConnectDataSource(
                 )
             } else emptyList(),
             burnRecords = if (has(TotalCaloriesBurnedRecord::class) && has(ActiveCaloriesBurnedRecord::class)) {
-                readAll<TotalCaloriesBurnedRecord>(rawFilter).map {
+                raw(TotalCaloriesBurnedRecord::class).map {
                     BurnRecord(it.startTime, it.endTime, it.startZoneOffset, it.endZoneOffset)
-                } + readAll<ActiveCaloriesBurnedRecord>(rawFilter).map {
+                } + raw(ActiveCaloriesBurnedRecord::class).map {
                     BurnRecord(it.startTime, it.endTime, it.startZoneOffset, it.endZoneOffset)
                 }
             } else null,
+            skipped = skipped,
         )
     }
 
@@ -133,10 +136,8 @@ class HealthConnectDataSource(
         val granted = client.permissionController.getGrantedPermissions()
         val z = zone()
         val localFilter = TimeRangeFilter.between(date.atStartOfDay(), date.plusDays(1).atStartOfDay())
-        val rawFilter = TimeRangeFilter.between(
-            date.atStartOfDay(z).toInstant(),
-            date.plusDays(1).atStartOfDay(z).toInstant(),
-        )
+        val rawStart = date.atStartOfDay(z).toInstant()
+        val rawEnd = date.plusDays(1).atStartOfDay(z).toInstant()
         val notes = mutableListOf<String>()
         val metrics = mutableListOf<MetricDiagnostics>()
         val aggOrigins = mutableSetOf<String>()
@@ -154,7 +155,7 @@ class HealthConnectDataSource(
             }
             val agg = client.aggregate(AggregateRequest(setOf(metric), localFilter))
             aggOrigins += agg.dataOrigins.map { it.packageName }
-            val records = readAll(type, rawFilter)
+            val records = readAll(type, rawStart, rawEnd) { notes += it }
             val byOrigin = records.groupBy { it.metadata.dataOrigin.packageName }
                 .mapValues { (_, rs) -> rs.sumOf { rawValue(it) ?: 0.0 } }
             metrics += MetricDiagnostics(label, aggValue(agg), byOrigin.values.sum(), byOrigin, records.size)
@@ -188,18 +189,33 @@ class HealthConnectDataSource(
         return DayDiagnostics(date, metrics, aggOrigins, notes)
     }
 
-    private suspend inline fun <reified T : Record> readAll(filter: TimeRangeFilter): List<T> =
-        readAll(T::class, filter)
-
-    private suspend fun <T : Record> readAll(type: KClass<T>, filter: TimeRangeFilter): List<T> {
-        val out = mutableListOf<T>()
-        var token: String? = null
-        do {
-            val resp = client.readRecords(ReadRecordsRequest(type, filter, pageToken = token))
-            out += resp.records
-            token = resp.pageToken
-        } while (!token.isNullOrEmpty())
-        return out
+    /**
+     * Reads all pages of [type] in [start, end). A malformed record makes the HC library throw for the
+     * whole page, so on [IllegalArgumentException] the window is split and the bad hour is skipped
+     * (reported through [onSkipped]). Records spanning a split point come back twice, hence distinctBy id.
+     */
+    private suspend fun <T : Record> readAll(
+        type: KClass<T>,
+        start: Instant,
+        end: Instant,
+        onSkipped: (String) -> Unit,
+    ): List<T> {
+        val result = readSplitting(start, end) { from, to ->
+            val out = mutableListOf<T>()
+            var token: String? = null
+            do {
+                val resp = client.readRecords(
+                    ReadRecordsRequest(type, TimeRangeFilter.between(from, to), pageToken = token)
+                )
+                out += resp.records
+                token = resp.pageToken
+            } while (!token.isNullOrEmpty())
+            out
+        }
+        result.skipped.forEach {
+            onSkipped("Pominięto uszkodzony rekord ${type.simpleName} w oknie ${it.start} – ${it.end}")
+        }
+        return if (result.skipped.isEmpty()) result.items else result.items.distinctBy { it.metadata.id }
     }
 
     private fun AggregationResult.toDayAggregate(date: LocalDate) = DayAggregate(

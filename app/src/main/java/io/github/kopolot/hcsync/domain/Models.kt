@@ -59,6 +59,8 @@ data class HealthSnapshot(
      * TotalCaloriesBurned and ActiveCaloriesBurned), so we cannot tell BMR-only days apart.
      */
     val burnRecords: List<BurnRecord>? = null,
+    /** Human-readable notes about windows skipped because HC returned a malformed record. */
+    val skipped: List<String> = emptyList(),
 )
 
 data class Workout(

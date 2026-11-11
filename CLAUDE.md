@@ -4,10 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A private, sideloaded Android app (Kotlin, Compose, WorkManager, minSdk 28, target/compile API 37) that reads Health Connect data (Samsung Health is the source), computes one summary per day, and POSTs it to a Google Apps Script web app that upserts rows into a Google Sheet. A trainer bot then reads the sheet. User-facing docs (README, STATUS, PLAN, UI strings, log messages) are written in **Polish**. Keep that convention.
+A private, sideloaded Android app (Kotlin, Compose, WorkManager, minSdk 28, target/compile API 37) that reads Health Connect data (Samsung Health is the source), computes one summary per day, and POSTs it to a Google Apps Script web app that upserts rows into a Google Sheet. A trainer bot then reads the sheet. User-facing docs (README, PLAN, UI strings, log messages) are written in **Polish**. Keep that convention.
 
 - `PLAN.md`: design decisions and data rules
-- `STATUS.md`: what has been verified and what's next (field test on a Galaxy S25)
 - `README.md`: setup and the column/rule table for the sheet
 
 ## Commands
