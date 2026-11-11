@@ -66,6 +66,41 @@ class DailyAggregatorTest {
     }
 
     @Test
+    fun `bmr-only flag marks days without calorie records`() {
+        val snap = HealthSnapshot(
+            aggregates = listOf(
+                DayAggregate(d("2026-11-08"), kcalBurnedTotal = 1565.0),
+                DayAggregate(d("2026-11-09"), kcalBurnedTotal = 1965.0, kcalActive = 400.0),
+                DayAggregate(d("2026-11-10"), kcalBurnedTotal = 1800.0),
+                DayAggregate(d("2026-11-11"), kcalBurnedTotal = 1700.0),
+            ),
+            burnRecords = listOf(
+                BurnRecord(at("2026-11-09T10:00"), at("2026-11-09T11:00")),
+                // crosses midnight: counts for both days, like HC's daily slicing
+                BurnRecord(at("2026-11-10T23:30"), at("2026-11-11T00:30")),
+            ),
+        )
+        val out = build("2026-11-07", "2026-11-11", snap).associateBy { it.date }
+        assertNull("no total -> no flag", out.getValue(d("2026-11-07")).kcalBurnedBmrOnly)
+        assertEquals(true, out.getValue(d("2026-11-08")).kcalBurnedBmrOnly)
+        assertEquals(false, out.getValue(d("2026-11-09")).kcalBurnedBmrOnly)
+        assertEquals(false, out.getValue(d("2026-11-10")).kcalBurnedBmrOnly)
+        assertEquals(false, out.getValue(d("2026-11-11")).kcalBurnedBmrOnly)
+    }
+
+    @Test
+    fun `bmr-only flag is null when records could not be read`() {
+        val snap = HealthSnapshot(aggregates = listOf(DayAggregate(d("2026-11-10"), kcalBurnedTotal = 1565.0)))
+        assertNull(build("2026-11-10", "2026-11-10", snap).single().kcalBurnedBmrOnly)
+    }
+
+    @Test
+    fun `record ending exactly at midnight does not touch next day`() {
+        val r = BurnRecord(at("2026-11-09T23:00"), at("2026-11-10T00:00"))
+        assertEquals(listOf(d("2026-11-09")), DailyAggregator.daysCovered(r, warsaw).toList())
+    }
+
+    @Test
     fun `aggregates outside range are ignored`() {
         val snap = HealthSnapshot(aggregates = listOf(DayAggregate(d("2026-11-01"), kcalIn = 1.0)))
         val out = build("2026-11-09", "2026-11-10", snap)

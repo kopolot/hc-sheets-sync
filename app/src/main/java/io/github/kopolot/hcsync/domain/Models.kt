@@ -22,6 +22,14 @@ data class Measurement(val time: Instant, val value: Double, val offset: ZoneOff
 
 data class TimeInterval(val start: Instant, val end: Instant)
 
+/** Time span of a TotalCaloriesBurned or ActiveCaloriesBurned record (real data, not HC's BMR estimate). */
+data class BurnRecord(
+    val start: Instant,
+    val end: Instant,
+    val startOffset: ZoneOffset? = null,
+    val endOffset: ZoneOffset? = null,
+)
+
 data class SleepSession(
     val start: Instant,
     val end: Instant,
@@ -46,6 +54,11 @@ data class HealthSnapshot(
     val bodyFat: List<Measurement> = emptyList(),
     val sleep: List<SleepSession> = emptyList(),
     val workouts: List<WorkoutSession> = emptyList(),
+    /**
+     * Calorie-burn records in the range. Null = unknown (no read permission for both
+     * TotalCaloriesBurned and ActiveCaloriesBurned), so we cannot tell BMR-only days apart.
+     */
+    val burnRecords: List<BurnRecord>? = null,
 )
 
 data class Workout(
@@ -64,6 +77,11 @@ data class DailySummary(
     val fatG: Double? = null,
     val carbsG: Double? = null,
     val kcalBurnedTotal: Int? = null,
+    /**
+     * true = [kcalBurnedTotal] is only Health Connect's BMR estimate (no calorie records that day);
+     * false = at least one real calorie record contributed; null = no total or unknown.
+     */
+    val kcalBurnedBmrOnly: Boolean? = null,
     val kcalActive: Int? = null,
     val steps: Long? = null,
     val restingHr: Long? = null,

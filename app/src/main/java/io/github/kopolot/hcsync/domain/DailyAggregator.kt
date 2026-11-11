@@ -14,7 +14,8 @@ import kotlin.math.roundToInt
  * - sums come straight from HC aggregates (already split per local day by HC);
  * - weight / body fat: earliest measurement of the day (morning value);
  * - sleep: sessions assigned to the day they END on, minus awake stages;
- * - workouts: assigned to the day they START on.
+ * - workouts: assigned to the day they START on;
+ * - kcal_burned_bmr_only: true when no calorie-burn record overlaps the day, i.e. HC's total is pure BMR.
  *
  * A record's own zone offset is used to decide its day when present, otherwise [zone].
  */
@@ -36,6 +37,7 @@ object DailyAggregator {
             .mapValues { (_, sessions) -> sessions.sumOf { asleepDuration(it).toMinutes() } }
         val workoutsByDay = snapshot.workouts
             .groupBy { localDate(it.start, it.startOffset, zone) }
+        val burnDays = snapshot.burnRecords?.flatMapTo(mutableSetOf()) { daysCovered(it, zone) }
 
         return generateSequence(from) { it.plusDays(1) }
             .takeWhile { !it.isAfter(toInclusive) }
@@ -48,6 +50,8 @@ object DailyAggregator {
                     fatG = agg?.fatG?.round(1),
                     carbsG = agg?.carbsG?.round(1),
                     kcalBurnedTotal = agg?.kcalBurnedTotal?.roundToInt(),
+                    kcalBurnedBmrOnly = if (agg?.kcalBurnedTotal == null || burnDays == null) null
+                        else day !in burnDays,
                     kcalActive = agg?.kcalActive?.roundToInt(),
                     steps = agg?.steps,
                     restingHr = agg?.restingHr,
@@ -70,6 +74,14 @@ object DailyAggregator {
             if (e.isAfter(s)) acc + Duration.between(s, e) else acc
         }
         return (total - awake).coerceAtLeast(Duration.ZERO)
+    }
+
+    /** Every local day the record overlaps (HC's daily aggregate splits records at midnight the same way). */
+    fun daysCovered(r: BurnRecord, zone: ZoneId): Sequence<LocalDate> {
+        val first = localDate(r.start, r.startOffset, zone)
+        val lastInstant = if (r.end.isAfter(r.start)) r.end.minusNanos(1) else r.start
+        val last = maxOf(first, localDate(lastInstant, r.endOffset ?: r.startOffset, zone))
+        return generateSequence(first) { it.plusDays(1) }.takeWhile { !it.isAfter(last) }
     }
 
     fun localDate(time: Instant, offset: ZoneOffset?, zone: ZoneId): LocalDate =

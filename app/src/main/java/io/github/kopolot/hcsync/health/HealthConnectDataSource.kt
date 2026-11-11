@@ -19,6 +19,7 @@ import androidx.health.connect.client.request.AggregateGroupByPeriodRequest
 import androidx.health.connect.client.request.AggregateRequest
 import androidx.health.connect.client.request.ReadRecordsRequest
 import androidx.health.connect.client.time.TimeRangeFilter
+import io.github.kopolot.hcsync.domain.BurnRecord
 import io.github.kopolot.hcsync.domain.DayAggregate
 import io.github.kopolot.hcsync.domain.HealthSnapshot
 import io.github.kopolot.hcsync.domain.Measurement
@@ -95,6 +96,13 @@ class HealthConnectDataSource(
                     startOffset = it.startZoneOffset,
                 )
             } else emptyList(),
+            burnRecords = if (has(TotalCaloriesBurnedRecord::class) && has(ActiveCaloriesBurnedRecord::class)) {
+                readAll<TotalCaloriesBurnedRecord>(rawFilter).map {
+                    BurnRecord(it.startTime, it.endTime, it.startZoneOffset, it.endZoneOffset)
+                } + readAll<ActiveCaloriesBurnedRecord>(rawFilter).map {
+                    BurnRecord(it.startTime, it.endTime, it.startZoneOffset, it.endZoneOffset)
+                }
+            } else null,
         )
     }
 
@@ -163,6 +171,18 @@ class HealthConnectDataSource(
         compare("steps", StepsRecord::class, StepsRecord.COUNT_TOTAL,
             { it[StepsRecord.COUNT_TOTAL]?.toDouble() }, { it.count.toDouble() })
 
+        // HC's total = TotalCalories records where they exist, otherwise ActiveCalories records + its own BMR estimate.
+        val total = metrics.find { it.metric == "kcal_burned_total" }
+        val active = metrics.find { it.metric == "kcal_active" }
+        if (total?.aggregate != null && active != null) {
+            notes += if (total.rawCount == 0) {
+                "kcal_burned_total: brak rekordów total, więc agregat = surowe active + szacunek BMR HC " +
+                    "≈ %.0f kcal BMR".format(total.aggregate - active.rawTotal) +
+                    if (active.rawCount == 0) " (brak też rekordów active: cała wartość to BMR)." else "."
+            } else {
+                "kcal_burned_total: są rekordy total (%d); ile BMR HC doliczył, nie da się tu wiarygodnie rozdzielić.".format(total.rawCount)
+            }
+        }
         notes += "Surowe = prosta suma rekordów zaczynających się tego dnia, bez deduplikacji. " +
             "Agregat HC dzieli rekordy na granicy dnia i stosuje priorytety źródeł."
         return DayDiagnostics(date, metrics, aggOrigins, notes)

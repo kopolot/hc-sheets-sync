@@ -14,7 +14,7 @@ const ctx={ SpreadsheetApp:{getActive:()=>ss}, PropertiesService:{getScriptPrope
   ContentService:{MimeType:{JSON:1}, createTextOutput:t=>({setMimeType(){return JSON.parse(t);}})}, Date };
 vm.createContext(ctx); vm.runInContext(fs.readFileSync(require('path').join(__dirname,'Code.gs'),'utf8'), ctx);
 const post=b=>ctx.doPost({postData:{contents:JSON.stringify(b)}});
-const day=(date,extra={})=>Object.assign({date,kcal_in:2000,protein_g:150,fat_g:null,carbs_g:200,kcal_burned_total:null,kcal_active:300,steps:9000,resting_hr:55,weight_kg:82.1,body_fat_pct:null,sleep_min:420,workouts:[]},extra);
+const day=(date,extra={})=>Object.assign({date,kcal_in:2000,protein_g:150,fat_g:null,carbs_g:200,kcal_burned_total:null,kcal_burned_bmr_only:null,kcal_active:300,steps:9000,resting_hr:55,weight_kg:82.1,body_fat_pct:null,sleep_min:420,workouts:[]},extra);
 const w=(id,start)=>({id,type:'strength_training',title:null,start,end:start,min:60});
 
 assert.deepStrictEqual(post({secret:'nope',days:[]}), {ok:false,error:'bad secret'});
@@ -28,6 +28,9 @@ r=post({secret:'abc',days:[day('2026-11-08'), day('2026-11-09',{kcal_in:2500,wor
 assert.strictEqual(D.length,4, 'no duplicates');
 assert.deepStrictEqual(D.slice(1).map(x=>x[0]),['2026-11-08','2026-11-09','2026-11-10'],'sorted');
 assert.strictEqual(D[2][1],2500);
+assert.strictEqual(D[0][16],'kcal_burned_bmr_only'); assert.strictEqual(D[1][16],'');
+post({secret:'abc',days:[day('2026-11-08',{kcal_burned_total:1565,kcal_burned_bmr_only:true})]});
+assert.strictEqual(D[1][5],1565); assert.strictEqual(D[1][16],true); assert.ok(D[1][15] instanceof Date,'updated_at stays in place');
 assert.strictEqual(W.length,2); assert.strictEqual(W[1][0],'a');
 // workouts of dates not in payload are kept
 post({secret:'abc',days:[day('2026-11-10',{workouts:[w('c','2026-11-10T06:00:00Z')]})]});

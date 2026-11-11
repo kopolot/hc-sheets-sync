@@ -15,7 +15,9 @@ var WORKOUT_SHEET = 'workouts';
 
 var DAILY_FIELDS = ['date', 'kcal_in', 'protein_g', 'fat_g', 'carbs_g', 'kcal_burned_total', 'kcal_active',
   'steps', 'resting_hr', 'weight_kg', 'body_fat_pct', 'sleep_min'];
-var DAILY_HEADERS = DAILY_FIELDS.concat(['workouts_count', 'workouts_min', 'workouts_summary', 'updated_at']);
+// Fields added after the first release go at the END, so rows already in the sheet keep their columns.
+var EXTRA_FIELDS = ['kcal_burned_bmr_only'];
+var DAILY_HEADERS = DAILY_FIELDS.concat(['workouts_count', 'workouts_min', 'workouts_summary', 'updated_at'], EXTRA_FIELDS);
 var WORKOUT_HEADERS = ['id', 'date', 'type', 'title', 'start', 'end', 'min', 'updated_at'];
 
 function doPost(e) {
@@ -60,7 +62,7 @@ function write_(ss, days) {
       workouts.reduce(function (s, w) { return s + (w.min || 0); }, 0),
       workouts.map(function (w) { return w.type + ' ' + w.min + 'min'; }).join('; '),
       now,
-    ]);
+    ], EXTRA_FIELDS.map(function (f) { return value_(d[f]); }));
     upsertRow_(dailyRows, dailyIndex, row, 0);
   });
   dailyRows.sort(function (a, b) { return a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0; });

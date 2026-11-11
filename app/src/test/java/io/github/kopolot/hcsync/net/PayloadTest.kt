@@ -35,7 +35,7 @@ class PayloadTest {
     fun `missing values are explicit nulls with snake_case keys`() {
         val day = encode(listOf(DailySummary(LocalDate.parse("2026-11-10")))).getValue("days").jsonArray[0].jsonObject
         val expectedKeys = setOf(
-            "date", "kcal_in", "protein_g", "fat_g", "carbs_g", "kcal_burned_total", "kcal_active",
+            "date", "kcal_in", "protein_g", "fat_g", "carbs_g", "kcal_burned_total", "kcal_burned_bmr_only", "kcal_active",
             "steps", "resting_hr", "weight_kg", "body_fat_pct", "sleep_min", "workouts",
         )
         assertEquals(expectedKeys, day.keys)

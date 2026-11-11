@@ -14,6 +14,7 @@ Jeden wiersz na dzień (strefa czasowa telefonu) w zakładce `daily`:
 |---|---|---|
 | `kcal_in`, `protein_g`, `fat_g`, `carbs_g` | NutritionRecord | suma dnia (agregat HC) |
 | `kcal_burned_total` | TotalCaloriesBurnedRecord | suma dnia (agregat HC), zobacz uwagi |
+| `kcal_burned_bmr_only` | Total/ActiveCaloriesBurnedRecord | `true` = tego dnia nie ma żadnych rekordów kalorii, więc `kcal_burned_total` to sam szacunek BMR z HC; `false` = był co najmniej jeden rekord; puste = brak `kcal_burned_total` albo brak zgody na oba typy. W arkuszu to ostatnia kolumna. |
 | `kcal_active` | ActiveCaloriesBurnedRecord | suma dnia (agregat HC) |
 | `steps` | StepsRecord | suma dnia (agregat HC, z deduplikacją) |
 | `resting_hr` | RestingHeartRateRecord | średnia dnia |
@@ -53,13 +54,11 @@ Test z terminala (fikcyjne dane):
 
 ```bash
 curl -L -H 'Content-Type: application/json' \
-  -d '{"secret":"TWOJ_SECRET","schema":1,"app_version":"curl","days":[{"date":"2000-01-01","kcal_in":1,"protein_g":null,"fat_g":null,"carbs_g":null,"kcal_burned_total":null,"kcal_active":null,"steps":null,"resting_hr":null,"weight_kg":null,"body_fat_pct":null,"sleep_min":null,"workouts":[]}]}' \
+  -d '{"secret":"TWOJ_SECRET","schema":1,"app_version":"curl","days":[{"date":"2000-01-01","kcal_in":1,"protein_g":null,"fat_g":null,"carbs_g":null,"kcal_burned_total":null,"kcal_burned_bmr_only":null,"kcal_active":null,"steps":null,"resting_hr":null,"weight_kg":null,"body_fat_pct":null,"sleep_min":null,"workouts":[]}]}' \
   'https://script.google.com/macros/s/XXXX/exec'
 ```
 
 Logikę skryptu można też sprawdzić offline: `node apps-script/Code.test.js`.
-
-Do testów z emulatorem wersja debug pozwala na zwykłe HTTP wyłącznie do `10.0.2.2` (host emulatora), np. `SYNC_URL=http://10.0.2.2:8765/exec SYNC_SECRET=test ./gradlew assembleDebug` z lokalnym mockiem. Wersja release tego nie ma.
 
 ### 2. Konfiguracja apki
 
@@ -67,7 +66,7 @@ Do testów z emulatorem wersja debug pozwala na zwykłe HTTP wyłącznie do `10.
 cp local.properties.example local.properties
 ```
 
-Uzupełnij `sdk.dir`, `SYNC_URL` (URL `/exec`) i `SYNC_SECRET` (ta sama wartość co `SECRET`). Plik `local.properties` jest w `.gitignore`. Wartości trafiają do `BuildConfig`, czyli do APK. Przy prywatnym sideloadzie to w porządku, ale nie udostępniaj nikomu zbudowanego APK.
+Uzupełnij `sdk.dir`, `SYNC_URL` (URL `/exec`) i `SYNC_SECRET` (ta sama wartość co `SECRET`). Zmienne środowiskowe `SYNC_URL`/`SYNC_SECRET` mają pierwszeństwo przed `local.properties`. Plik `local.properties` jest w `.gitignore`. Wartości trafiają do `BuildConfig`, czyli do APK. Przy prywatnym sideloadzie to w porządku, ale nie udostępniaj nikomu zbudowanego APK.
 
 ### 3. Build i instalacja
 
@@ -87,9 +86,21 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 4. **Samsung:** Ustawienia → Aplikacje → HC Sheets Sync → Bateria → **Bez ograniczeń**. Inaczej One UI potrafi uśpić WorkManagera.
 5. W Samsung Health sprawdź, czy synchronizacja z Health Connect jest włączona (Ustawienia → Health Connect) dla wszystkich typów danych.
 
+### 5. Testy lokalne z mockiem (opcjonalnie)
+
+Wersja debug pozwala na zwykłe HTTP wyłącznie do `localhost`/`127.0.0.1`. Wersja release tego nie ma. Port hosta przekierowuje się przez `adb reverse`, co działa na każdym emulatorze i na telefonie podłączonym przez USB:
+
+```bash
+adb reverse tcp:8765 tcp:8765
+SYNC_URL=http://127.0.0.1:8765/exec SYNC_SECRET=test ./gradlew assembleDebug
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+Zmienne środowiskowe nadpisują `local.properties`, więc taki build nie wyśle niczego do prawdziwego arkusza. Po testach przebuduj apkę bez tych zmiennych, inaczej sync będzie dalej szedł do mocka.
+
 ## Uwagi
 
-- **`kcal_burned_total` zawiera szacunek BMR liczony przez Health Connect.** Na czystym emulatorze, bez żadnych rekordów, agregat HC zwraca ~1565 kcal na każdy dzień. HC sam dolicza przemianę spoczynkową (z wagi/wzrostu albo domyślnych wartości). Samsung nie zapisuje do HC kalorii aktywności spoza treningów, więc ta liczba to w praktyce „BMR + to, co dotarło do HC”, a nie pełne TDEE. Dla bota pewniejsze są `kcal_active` i treningi. Sekcja Diagnostyka pokazuje, ile z tej liczby pochodzi z prawdziwych rekordów.
+- **`kcal_burned_total` zawiera szacunek BMR liczony przez Health Connect.** Jeśli danego dnia nie ma rekordów TotalCaloriesBurned, HC liczy sumę jako rekordy ActiveCaloriesBurned plus własny szacunek przemiany spoczynkowej (z wagi/wzrostu albo domyślnych wartości). Na czystym emulatorze, bez żadnych rekordów, wychodzi ~1565 kcal na każdy dzień. Samsung nie zapisuje do HC kalorii aktywności spoza treningów, więc ta liczba to w praktyce „BMR + to, co dotarło do HC”, a nie pełne TDEE. Dni, w których to wyłącznie BMR, oznacza `kcal_burned_bmr_only = true`; bot powinien je pomijać albo traktować jako szacunek. Sekcja Diagnostyka pokazuje surowe sumy total i active osobno, a gdy nie ma rekordów total, wylicza szacowany BMR (agregat − surowe active).
 - **Strefa czasowa:** dni liczone są w strefie telefonu. Jeśli rekord ma własny offset strefy (np. pomiar w podróży), dzień liczy się według niego.
 - **Dzisiejszy dzień** jest niepełny i zostanie nadpisany przy kolejnym syncu.
 - **Powtórz backfill:** przycisk w sekcji Sync (np. po nadaniu zgody na historię).

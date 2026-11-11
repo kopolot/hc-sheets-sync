@@ -11,8 +11,10 @@ val localProps = Properties().apply {
     if (f.exists()) f.inputStream().use { load(it) }
 }
 
+// Environment wins over local.properties, so a one-off `SYNC_URL=... ./gradlew assembleDebug`
+// (e.g. pointing at a local mock) really overrides the real values stored in local.properties.
 fun buildConfigString(key: String): String {
-    val raw = localProps.getProperty(key) ?: System.getenv(key) ?: ""
+    val raw = System.getenv(key)?.takeIf { it.isNotBlank() } ?: localProps.getProperty(key) ?: ""
     return "\"" + raw.trim().replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 }
 
